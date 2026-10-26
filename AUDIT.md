@@ -33,7 +33,7 @@ few real privacy holes, and honesty between the docs and the code.
 > `permissions`. Its install warning is unavoidable for any CDP-based tool.
 
 ### Third-party extension noise (done 2026-07-22)
-- [x] Found via a real capture (`clip_mrvp41rd`, dev.eliteperformance.com): the
+- [x] Found via a real capture (`clip_mrvp41rd`, on a client staging site): the
       **axe DevTools extension's** telemetry (`axe.deque.com` CORS failure) was
       captured and became the **false `primary_suspect`**, flipping a *feedback*
       clip into *bug* mode and burying the user's actual notes.
