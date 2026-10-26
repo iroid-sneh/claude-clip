@@ -1,0 +1,21 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+.vite/
+clips/
+
+# Capture artifacts and local scratch recordings (never publish these)
+*.clip
+*.webm
+*.mp4
+*.storyboard.png
+
+# Vite dev leftovers
+vite.config.ts.timestamp-*.mjs
+
+# Env files (real values live only on the server) + packaged extension
+.env
+.env.*
+!.env.example
+release/
