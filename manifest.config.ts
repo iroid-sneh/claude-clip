@@ -3,7 +3,7 @@ import { defineManifest } from '@crxjs/vite-plugin'
 export default defineManifest({
   manifest_version: 3,
   name: 'Claude Clip',
-  version: '0.1.0',
+  version: '0.1.1',
   description:
     'Record a bug on any site; Claude diagnoses it from one link. Captures video keyframes, network (with bodies), console & errors via the DevTools Protocol.',
   action: {

@@ -326,9 +326,10 @@ async function startRecording(mic: boolean, transcribe: boolean): Promise<AckRes
     session.attachError = `Video capture unavailable: ${(err as Error).message}`
   }
 
-  // Turn on the drawing overlay + interaction tracking in the page. If this
-  // fails, the page's content script is stale (common right after reloading an
-  // unpacked extension) — surface that so the popup can prompt a page reload.
+  // Turn on the drawing overlay + interaction tracking in the page. If nobody
+  // answers, the tab was opened before the extension was installed/reloaded so
+  // it has no content script — inject it now (it arms itself via CONTENT_READY)
+  // instead of making the user reload the page and start again.
   try {
     await chrome.tabs.sendMessage(tab.id, {
       type: 'SET_OVERLAY',
@@ -337,11 +338,35 @@ async function startRecording(mic: boolean, transcribe: boolean): Promise<AckRes
     } satisfies Msg)
     overlayReady = true
   } catch {
-    overlayReady = false
+    overlayReady = await injectContentScripts(tab.id)
   }
 
   persistTimer = setInterval(() => void persist(), 2000)
   return { ok: true }
+}
+
+/**
+ * Inject the manifest's content scripts into a tab that predates the extension.
+ * Paths come from the built manifest (CRXJS hashes the filenames). MAIN goes
+ * first so the isolated script's "record-on" bridge message has a listener.
+ */
+async function injectContentScripts(tabId: number): Promise<boolean> {
+  type Script = { js?: string[]; world?: 'MAIN' | 'ISOLATED' }
+  const scripts = (chrome.runtime.getManifest().content_scripts ?? []) as Script[]
+  const ordered = [...scripts].sort((a, b) => Number(b.world === 'MAIN') - Number(a.world === 'MAIN'))
+  try {
+    for (const cs of ordered) {
+      if (!cs.js?.length) continue
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: cs.js,
+        world: cs.world === 'MAIN' ? 'MAIN' : 'ISOLATED',
+      })
+    }
+    return true
+  } catch {
+    return false // restricted page (Web Store, PDF viewer…) — popup shows the reload hint
+  }
 }
 
 async function stopRecording(): Promise<AckResponse> {

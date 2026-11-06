@@ -126,7 +126,16 @@ function deactivate() {
 
 // ── request/response bridge with the isolated content script ────────────────
 
-window.addEventListener('message', (e: MessageEvent) => {
+// Page JS outlives an extension reload, so a copy injected at record time can
+// land next to one that's still here — only the first installs the bridge
+// (otherwise every page error/console line would be reported twice).
+const w = window as unknown as { __claudeClipMain?: boolean }
+if (!w.__claudeClipMain) {
+  w.__claudeClipMain = true
+  window.addEventListener('message', onBridgeMessage)
+}
+
+function onBridgeMessage(e: MessageEvent): void {
   if (e.source !== window) return
   const d = e.data as Msg | undefined
   if (!d || typeof d.__cc !== 'string') return
@@ -141,4 +150,4 @@ window.addEventListener('message', (e: MessageEvent) => {
       deactivate()
       break
   }
-})
+}

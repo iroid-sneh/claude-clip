@@ -45,6 +45,8 @@ export class Overlay {
   /** Screen bounds of each mark's badge + note pill, rebuilt every frame, so a
    * click can be hit-tested to "edit this note" instead of drawing a new mark. */
   private labelBounds = new Map<string, LabelHit>()
+  /** Scroll state each mark was drawn at, so it moves with the page content. */
+  private anchors = new Map<string, ScrollAnchor>()
 
   constructor() {
     this.canvas = document.createElement('canvas')
@@ -77,6 +79,7 @@ export class Overlay {
     this.onPointerDown = this.onPointerDown.bind(this)
     this.onPointerMove = this.onPointerMove.bind(this)
     this.onPointerUp = this.onPointerUp.bind(this)
+    this.onWheel = this.onWheel.bind(this)
     this.resize = this.resize.bind(this)
   }
 
@@ -88,6 +91,7 @@ export class Overlay {
     this.resize()
     window.addEventListener('resize', this.resize)
     this.canvas.addEventListener('pointerdown', this.onPointerDown)
+    this.canvas.addEventListener('wheel', this.onWheel, { passive: false })
     this.loop()
   }
 
@@ -96,12 +100,14 @@ export class Overlay {
     this.visible = false
     window.removeEventListener('resize', this.resize)
     this.canvas.removeEventListener('pointerdown', this.onPointerDown)
+    this.canvas.removeEventListener('wheel', this.onWheel)
     cancelAnimationFrame(this.raf)
     this.editor?.remove()
     this.editor = undefined
     this.canvas.remove()
     this.host.remove()
     this.annotations = []
+    this.anchors.clear()
     this.cancelled.clear()
   }
 
@@ -173,9 +179,10 @@ export class Overlay {
     if (this.tool === 'text') {
       const x = e.clientX
       const y = e.clientY
+      const anchor = scrollAnchorAt(x, y) // before typing — the page may scroll meanwhile
       this.openNoteEditor(x, y, (note) => {
         if (!note) return
-        const annotation = this.makeAnnotation('text', [x, y, x + 1, y + 1])
+        const annotation = this.makeAnnotation('text', [x, y, x + 1, y + 1], anchor)
         annotation.note = note
         void this.enrichAndSend(annotation)
       })
@@ -245,14 +252,16 @@ export class Overlay {
     }
     if (!full) return undefined
 
-    // Bounding box of the shape, expanded to include the note pill + margin.
+    // Bounding box of the shape (where it is on screen NOW — the page may have
+    // scrolled since it was drawn), expanded to include the note pill + margin.
+    const pts = this.screenPoints(a)
     const xs: number[] = []
     const ys: number[] = []
-    for (let i = 0; i < a.points.length - 1; i += 2) {
-      xs.push(a.points[i])
-      ys.push(a.points[i + 1])
+    for (let i = 0; i < pts.length - 1; i += 2) {
+      xs.push(pts[i])
+      ys.push(pts[i + 1])
     }
-    const [ax, ay] = targetPoint(a.type, a.points)
+    const [ax, ay] = targetPoint(a.type, pts)
     const pad = 28
     let minX = Math.min(...xs) - pad
     let minY = Math.min(...ys) - pad
@@ -274,7 +283,11 @@ export class Overlay {
 
   /** Create + register an annotation. The number is its position, so an undo
    * frees the number for the next mark. */
-  private makeAnnotation(type: ToolKind, points: number[]): Annotation {
+  private makeAnnotation(
+    type: ToolKind,
+    points: number[],
+    anchor = scrollAnchorAt(...targetPoint(type, points)),
+  ): Annotation {
     const annotation: Annotation = {
       id: `ann_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e4)}`,
       tMs: Date.now() - this.startEpoch,
@@ -287,7 +300,32 @@ export class Overlay {
       viewport: { w: window.innerWidth, h: window.innerHeight },
     }
     this.annotations.push(annotation)
+    this.anchors.set(annotation.id, anchor)
     return annotation
+  }
+
+  /** The mark's points where they sit on screen now (drawn points + scroll since). */
+  private screenPoints(a: Annotation): number[] {
+    const anchor = this.anchors.get(a.id)
+    if (!anchor) return a.points
+    const [dx, dy] = scrollOffset(anchor)
+    if (!dx && !dy) return a.points
+    return a.points.map((v, i) => v + (i % 2 ? dy : dx))
+  }
+
+  /**
+   * With a drawing tool active the canvas sits over the page, so the wheel only
+   * scrolls the window. Hand it to the inner scroll box under the pointer (app
+   * shells, modals, sidebars) so you can scroll anywhere and keep marking.
+   */
+  private onWheel(e: WheelEvent): void {
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? window.innerHeight : 1
+    const dx = e.deltaX * unit
+    const dy = e.deltaY * unit
+    const box = scrollBoxUnder(e.clientX, e.clientY, dx, dy)
+    if (!box) return // let the window scroll natively
+    e.preventDefault()
+    box.scrollBy(dx, dy)
   }
 
   /**
@@ -356,7 +394,7 @@ export class Overlay {
 
   /** Attach the element under the mark (+ its outerHTML and key styles). */
   private async enrichAndSend(annotation: Annotation): Promise<void> {
-    const [px, py] = targetPoint(annotation.type, annotation.points)
+    const [px, py] = targetPoint(annotation.type, this.screenPoints(annotation))
     const el = elementUnder(px, py)
     if (el) {
       annotation.target = await describeElement(el, px, py)
@@ -373,12 +411,14 @@ export class Overlay {
     if (!removed) return
     // Suppress a not-yet-sent send, and remove it from the session if sent.
     this.cancelled.add(removed.id)
+    this.anchors.delete(removed.id)
     chrome.runtime.sendMessage({ type: 'REMOVE_ANNOTATION', id: removed.id }).catch(() => {})
   }
 
   private clearAll(): void {
     for (const a of this.annotations) this.cancelled.add(a.id)
     this.annotations = []
+    this.anchors.clear()
     chrome.runtime.sendMessage({ type: 'CLEAR_ANNOTATIONS' }).catch(() => {})
   }
 
@@ -403,7 +443,7 @@ export class Overlay {
 
   /** Open the editor on an existing mark to change (or clear) its note. */
   private editAnnotation(a: Annotation): void {
-    const [ax, ay] = targetPoint(a.type, a.points)
+    const [ax, ay] = targetPoint(a.type, this.screenPoints(a))
     this.openNoteEditor(
       ax,
       ay,
@@ -430,9 +470,21 @@ export class Overlay {
 
   private loop(): void {
     this.ctx.clearRect(0, 0, window.innerWidth, window.innerHeight)
-    for (const a of this.annotations) renderAnnotation(this.ctx, this.rc, a)
+    // Each mark is shifted by how far its content has scrolled since it was
+    // drawn, so it stays glued to what it marks instead of to the screen.
+    const offsets = this.annotations.map((a): [number, number] => {
+      const anchor = this.anchors.get(a.id)
+      return anchor ? scrollOffset(anchor) : [0, 0]
+    })
+    this.annotations.forEach((a, i) => {
+      const [dx, dy] = offsets[i]
+      this.ctx.save()
+      this.ctx.translate(dx, dy)
+      renderAnnotation(this.ctx, this.rc, a)
+      this.ctx.restore()
+    })
     this.labelBounds.clear() // rebuilt below so hit-testing stays in sync
-    for (const a of this.annotations) this.renderMarkLabel(a) // badges + notes on top
+    this.annotations.forEach((a, i) => this.renderMarkLabel(a, ...offsets[i])) // badges + notes on top
     if (this.drawing && this.livePoints.length >= 2) {
       renderLive(this.ctx, this.rc, this.style(), this.livePoints, this.liveSeed)
     }
@@ -440,9 +492,11 @@ export class Overlay {
   }
 
   /** Draw the mark's number badge and its note text, near the mark. */
-  private renderMarkLabel(a: Annotation): void {
+  private renderMarkLabel(a: Annotation, dx: number, dy: number): void {
     const ctx = this.ctx
-    const [ax, ay] = targetPoint(a.type, a.points)
+    const [tx, ty] = targetPoint(a.type, a.points)
+    const ax = tx + dx
+    const ay = ty + dy
     ctx.save()
 
     // number badge
@@ -472,8 +526,10 @@ export class Overlay {
       const boxH = lines.length * lh + pad * 2
       let bx = ax + r + 6
       let by = ay - boxH / 2
-      bx = Math.max(4, Math.min(bx, window.innerWidth - boxW - 4))
-      by = Math.max(4, Math.min(by, window.innerHeight - boxH - 4))
+      // Keep the pill on screen only while its mark is — otherwise it would
+      // stick to the viewport edge after the mark scrolls away.
+      if (ax >= 0 && ax <= window.innerWidth) bx = Math.max(4, Math.min(bx, window.innerWidth - boxW - 4))
+      if (ay >= 0 && ay <= window.innerHeight) by = Math.max(4, Math.min(by, window.innerHeight - boxH - 4))
       roundRect(ctx, bx, by, boxW, boxH, 8)
       ctx.fillStyle = 'rgba(26,25,21,0.94)'
       ctx.fill()
@@ -534,6 +590,65 @@ function targetPoint(type: ToolKind, pts: number[]): [number, number] {
   const y1 = pts[pts.length - 1]
   if (type === 'rectangle' || type === 'ellipse') return [(x0 + x1) / 2, (y0 + y1) / 2]
   return [x1, y1] // arrow tip / end of pen/highlighter stroke
+}
+
+/**
+ * What a mark is scrolled along with: the window, plus every inner scroll box
+ * between the marked element and the viewport. Inside a position:fixed element
+ * (sticky header, modal) the window scroll no longer moves it.
+ */
+interface ScrollAnchor {
+  winX: number
+  winY: number
+  fixed: boolean
+  boxes: { el: Element; left: number; top: number }[]
+}
+
+function scrollAnchorAt(x: number, y: number): ScrollAnchor {
+  const anchor: ScrollAnchor = { winX: window.scrollX, winY: window.scrollY, fixed: false, boxes: [] }
+  for (let n = elementUnder(x, y); n && n !== document.scrollingElement; n = n.parentElement) {
+    const cs = getComputedStyle(n)
+    if (isScrollBox(n, cs)) anchor.boxes.push({ el: n, left: n.scrollLeft, top: n.scrollTop })
+    if (cs.position === 'fixed') {
+      anchor.fixed = true
+      break
+    }
+  }
+  return anchor
+}
+
+/** How far the anchored content has moved on screen since the mark was drawn. */
+function scrollOffset(a: ScrollAnchor): [number, number] {
+  let dx = a.fixed ? 0 : a.winX - window.scrollX
+  let dy = a.fixed ? 0 : a.winY - window.scrollY
+  for (const b of a.boxes) {
+    if (!b.el.isConnected) continue
+    dx += b.left - b.el.scrollLeft
+    dy += b.top - b.el.scrollTop
+  }
+  return [dx, dy]
+}
+
+function isScrollBox(el: Element, cs: CSSStyleDeclaration): boolean {
+  const scrollable = (v: string) => v === 'auto' || v === 'scroll' || v === 'overlay'
+  return (
+    (scrollable(cs.overflowY) && el.scrollHeight > el.clientHeight) ||
+    (scrollable(cs.overflowX) && el.scrollWidth > el.clientWidth)
+  )
+}
+
+/** Nearest inner scroll box under (x,y) that can still move in the wheel's
+ * direction; null means the window should take it. */
+function scrollBoxUnder(x: number, y: number, dx: number, dy: number): Element | null {
+  for (let n = elementUnder(x, y); n && n !== document.scrollingElement; n = n.parentElement) {
+    if (!isScrollBox(n, getComputedStyle(n))) continue
+    const canY =
+      (dy > 0 && n.scrollTop + n.clientHeight < n.scrollHeight - 1) || (dy < 0 && n.scrollTop > 0)
+    const canX =
+      (dx > 0 && n.scrollLeft + n.clientWidth < n.scrollWidth - 1) || (dx < 0 && n.scrollLeft > 0)
+    if (canY || canX) return n
+  }
+  return null
 }
 
 /** Topmost page element at a point, ignoring our own overlay. */

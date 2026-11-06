@@ -1,6 +1,6 @@
 {
   "name": "claude-clip",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Record a bug on any site; Claude diagnoses it from one link. Captures video keyframes, network (with bodies), console, and errors via the Chrome DevTools Protocol.",
   "type": "module",
   "scripts": {
